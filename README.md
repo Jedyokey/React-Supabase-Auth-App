@@ -7,9 +7,7 @@ Minimal React + Vite starter that demonstrates Supabase auth (email sign-up, sig
 - [package.json](package.json)
 - [vite.config.js](vite.config.js)
 - [eslint.config.js](eslint.config.js)
-- [.gitignore](.gitignore)
 - [.env.example](.env.example)
-- [.env.local](.env.local)
 
 ### Source
 - [src/main.jsx](src/main.jsx)
