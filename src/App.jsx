@@ -3,6 +3,7 @@ import { useAuth } from "./AuthContext"
 import SignIn from "./pages/SignInPage/SignIn"
 import SignUp from "./pages/SignInPage/SignUp"
 import Dashboard from "./pages/Dashboard"
+import OrdersLive from "./pages/OrdersLive"
 import RecoverPassword from "./pages/RecoverPassword"
 import UpdatePassword from "./pages/UpdatePassword"
 import ProtectedRoute from "./components/ProtectedRoute"
@@ -39,6 +40,15 @@ function App() {
           element={
             <ProtectedRoute>
               <Dashboard />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/dashboard/orders"
+          element={
+            <ProtectedRoute>
+              <OrdersLive />
             </ProtectedRoute>
           }
         />
