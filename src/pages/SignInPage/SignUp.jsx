@@ -1,39 +1,53 @@
 import { useState } from "react"
 import { supabase } from "../../supabaseClient"
 import { useNavigate } from "react-router-dom"
+import PasswordToggler from "../../components/PasswordToggler"
 
 export default function SignUp() {
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
   const [confirmPassword, setConfirmPassword] = useState("")
+  const [errorMessage, setErrorMessage] = useState("")
+  const [loading, setLoading] = useState(false)
   const navigate = useNavigate()
 
   const handleSubmit = async (e) => {
     e.preventDefault()
+    setErrorMessage("")
+    setLoading(true)
+
     if (password !== confirmPassword) {
-      console.log("Passwords do not match")
+      alert("Passwords do not match")
+      setLoading(false);
       return
     }
-    // console.log("Sign up attempted with:", { email, password })
 
-    // Sign up user
-    const {data, error} = await supabase.auth.signUp({
-      email,
-      password,
-      options: {
-        emailRedirectedTo: window.location.origin + "/", // optional redirect after confirmation
-      },
-    })
+    try {
+      const { data, error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          emailRedirectTo: window.location.origin + "/",
+        },
+      });
 
-    if (error) {
-      console.error(error)
-      alert(error.message)
-    } else {
-      alert("Check your email to confirm your account!")
-      console.log("Sign-up success:", data)
-      navigate("/signin")
+      if (error) {
+        console.error("Supabase error:", error);
+        setErrorMessage(error.message);
+        setLoading(false);
+        return;
+      }
+
+      alert("Check your email to confirm your account!");
+      navigate("/signin");
+
+    } catch (err) {
+      console.error("Network error:", err);
+      setErrorMessage("Network error — check your connection and try again.");
+    } finally {
+      setLoading(false);
     }
-  }
+  };
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-indigo-100 via-purple-100 to-pink-100 px-4">
@@ -65,48 +79,38 @@ export default function SignUp() {
               />
             </div>
 
-            <div>
-              <label
-                htmlFor="password"
-                className="block text-sm font-medium text-gray-700 mb-1.5"
-              >
-                Password
-              </label>
-              <input
-                id="password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••"
-                required
-                className="w-full px-3 py-2 bg-white border border-gray-300 rounded-md text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-400 focus:border-transparent transition-all"
-              />
-            </div>
+            {/* PASSWORD */}
+            <PasswordToggler
+              id="password"
+              label="Password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
 
-            <div>
-              <label
-                htmlFor="confirmPassword"
-                className="block text-sm font-medium text-gray-700 mb-1.5"
-              >
-                Confirm Password
-              </label>
-              <input
-                id="confirmPassword"
-                type="password"
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
-                placeholder="••••••••"
-                required
-                className="w-full px-3 py-2 bg-white border border-gray-300 rounded-md text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-400 focus:border-transparent transition-all"
-              />
-            </div>
+            {/* CONFIRM PASSWORD */}
+            <PasswordToggler
+              id="confirmPassword"
+              label="Confirm Password"
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+            />
 
-            {/* Matching gradient submit button */}
             <button
               type="submit"
-              className="w-full bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 text-white font-semibold py-2.5 px-4 rounded-md shadow-md hover:shadow-lg hover:scale-[1.02] transition-all duration-300 focus:outline-none focus:ring-2 focus:ring-purple-300 focus:ring-offset-2 cursor-pointer"
+              disabled={loading}
+              className={`w-full bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 
+              text-white font-semibold py-2.5 px-4 rounded-md shadow-md transition-all duration-300 
+              focus:outline-none focus:ring-2 focus:ring-purple-300 focus:ring-offset-2 cursor-pointer
+              ${loading ? "opacity-70 cursor-not-allowed" : "hover:shadow-lg hover:scale-[1.02]"}`}
             >
-              Sign Up
+              {loading ? (
+                <div className="flex items-center justify-center gap-2">
+                  <span className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+                  <span>Signing Up...</span>
+                </div>
+              ) : (
+                "Sign Up"
+              )}
             </button>
           </form>
 
