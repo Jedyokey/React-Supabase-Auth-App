@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react"
 import { supabase } from "../supabaseClient"
 import { useNavigate, useSearchParams } from "react-router-dom"
+import PasswordToggler from "../components/PasswordToggler"
 
 export default function UpdatePassword() {
   const navigate = useNavigate()
@@ -69,28 +70,27 @@ export default function UpdatePassword() {
     <div className="flex items-center justify-center min-h-screen bg-gray-100">
       <form
         onSubmit={handleUpdate}
-        className="bg-white p-8 rounded-lg shadow-md w-full max-w-md"
+        className="bg-white p-8 rounded-lg shadow-md w-full max-w-md space-y-4"
       >
         <h2 className="text-2xl font-semibold mb-6 text-center text-gray-800">Set New Password</h2>
 
         {error && <p className="text-red-500 text-sm mb-4 bg-red-50 p-2 rounded border border-red-200">{error}</p>}
         {message && !error && <p className="text-gray-600 text-sm mb-4">{message}</p>}
 
-        <input
-          type="password"
-          placeholder="New Password"
-          className="border w-full p-3 rounded mb-4 focus:outline-none focus:ring-2 focus:ring-purple-400 focus:border-transparent transition-all"
+        {/* NEW PASSWORD */}
+        <PasswordToggler
+          id="password"
+          label="New Password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
-          required
         />
-        <input
-          type="password"
-          placeholder="Confirm New Password"
-          className="border w-full p-3 rounded mb-6 focus:outline-none focus:ring-2 focus:ring-purple-400 focus:border-transparent transition-all"
+
+        {/* CONFIRM NEW PASSWORD */}
+        <PasswordToggler
+          id="confirmPassword"
+          label="Confirm New Password"
           value={confirmPassword}
           onChange={(e) => setConfirmPassword(e.target.value)}
-          required
         />
 
         <button
