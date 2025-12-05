@@ -10,33 +10,6 @@ export default function SignIn() {
   const [errorMessage, setErrorMessage] = useState("");
   const [loading, setLoading] = useState(false);
 
-  const fetchOrder = async () => {
-    try {
-      let { data: orders, error } = await supabase
-        .from('orders')
-        .select('*')
-        // .range(0, 9)
-
-        // Read specific columns (Supabase)
-        // .select('id, name')
-
-        // Filters (Supabase)
-        // .eq('name', 'Mary Johnson')
-        // .lte('price', 500.00)
-        .gt('price', 400)
-
-      if (error) {
-        console.error("Error fetching orders:", error)
-        return
-      }
-
-      console.log("Orders:", orders)
-      console.log(`Total orders: ${orders?.length || 0}`)
-    } catch (err) {
-      console.error("Unexpected error fetching orders:", err)
-    }
-  }
-
   const handleSubmit = async (e) => {
     e.preventDefault()
     setLoading(true)
@@ -65,9 +38,6 @@ export default function SignIn() {
         { onConflict: "email" }
       )
     }
-
-    // Fetch and display orders in console
-    await fetchOrder()
 
     navigate("/dashboard")
   }
