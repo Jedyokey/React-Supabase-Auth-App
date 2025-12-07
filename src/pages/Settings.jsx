@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { supabase } from "../supabaseClient";
 import { useAuth } from "../AuthContext";
 import { useTheme } from "../ThemeContext";
@@ -14,6 +14,8 @@ export default function Settings() {
   const [notifications, setNotifications] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [imageLoaded, setImageLoaded] = useState(false); // Track image load state
+  const imageCache = useRef(new Map()); // Simple cache
 
   // Load user profile and preferences
     useEffect(() => {
@@ -29,10 +31,11 @@ export default function Settings() {
             .single();
 
             if (isActive && !error && data) {
-            setProfile({
-                full_name: data.full_name || "",
-                avatar_url: data.avatar_url || ""
-            });
+              setProfile({
+                  full_name: data.full_name || "",
+                  avatar_url: data.avatar_url || ""
+              });
+              setImageLoaded(false); // Reset image load state when URL changes
             }
         };
 
@@ -48,48 +51,83 @@ export default function Settings() {
         };
     }, [user]);
 
+    // Preload avatar image
+    useEffect(() => {
+      if (!profile.avatar_url) return;
+      
+      // Check cache first
+      if (imageCache.current.has(profile.avatar_url)) {
+        setImageLoaded(true);
+        return;
+      }
+
+      // Preload image
+      const img = new Image();
+      img.src = profile.avatar_url;
+      
+      img.onload = () => {
+        setImageLoaded(true);
+        imageCache.current.set(profile.avatar_url, true); // Cache it
+      };
+      
+      img.onerror = () => {
+        setImageLoaded(true); // Still set to true to show fallback
+      };
+    }, [profile.avatar_url]);
+
+  // Handle avatar upload
   const handleAvatarUpload = async (event) => {
-        try {
-            setUploading(true);
-            const file = event.target.files[0];
-            if (!file) return;
+      try {
+          setUploading(true);
+          const file = event.target.files[0];
+          if (!file) return;
 
-            const fileExt = file.name.split('.').pop();
-            const fileName = `${Date.now()}.${fileExt}`;
-            const filePath = `profile/${user.id}/${fileName}`;
+          // Validate file size (max 2MB)
+          if (file.size > 2 * 1024 * 1024) {
+            alert("Image size should be less than 2MB");
+            return;
+          }
 
-            // Upload
-            const { error: uploadError } = await supabase.storage
-            .from('avatars')
-            .upload(filePath, file, { upsert: true });
+          const fileExt = file.name.split('.').pop();
+          const fileName = `${Date.now()}.${fileExt}`;
+          const filePath = `profile/${user.id}/${fileName}`;
 
-            if (uploadError) throw uploadError;
+          // Upload
+          const { error: uploadError } = await supabase.storage
+          .from('avatars')
+          .upload(filePath, file, { upsert: true });
 
-            // Get PUBLIC URL of the uploaded file
-            const { data: { publicUrl } } = supabase.storage
-            .from('avatars')
-            .getPublicUrl(filePath);
+          if (uploadError) throw uploadError;
 
-            // Save avatar URL
-            const { error: updateError } = await supabase
-            .from('profiles')
-            .upsert({
-                id: user.id,
-                avatar_url: publicUrl, // Store public URL
-                updated_at: new Date().toISOString()
-            });
+          // Get PUBLIC URL of the uploaded file
+          const { data: { publicUrl } } = supabase.storage
+          .from('avatars')
+          .getPublicUrl(filePath);
 
-            if (updateError) throw updateError;
+          // Clear cache for this URL
+          imageCache.current.delete(profile.avatar_url);
 
-            setProfile(prev => ({ ...prev, avatar_url: publicUrl }));
-            alert("Profile picture updated successfully!");
+          // Save avatar URL
+          const { error: updateError } = await supabase
+          .from('profiles')
+          .upsert({
+              id: user.id,
+              avatar_url: publicUrl, // Store public URL
+              updated_at: new Date().toISOString()
+          });
 
-        } catch (error) {
-            console.error("Error uploading avatar:", error);
-            alert("Error uploading profile picture");
-        } finally {
-            setUploading(false);
-        }
+          if (updateError) throw updateError;
+
+          setProfile(prev => ({ ...prev, avatar_url: publicUrl }));
+          setImageLoaded(false); // Reset for new image
+          alert("Profile picture updated successfully!");
+
+      } catch (error) {
+          console.error("Error uploading avatar:", error);
+          alert("Error uploading profile picture");
+      } finally {
+          setUploading(false);
+      }
    };
 
   const saveProfile = async () => {
@@ -142,6 +180,9 @@ export default function Settings() {
                       src={profile.avatar_url} 
                       alt="Profile" 
                       className="w-full h-full object-cover"
+                      loading="lazy"
+                      onLoad={() => setImageLoaded(true)}
+                      onError={() => setImageLoaded(true)}
                     />
                   ) : (
                     <div className="w-16 h-16 bg-indigo-500 rounded-full flex items-center justify-center text-white text-2xl font-bold">
@@ -162,6 +203,7 @@ export default function Settings() {
                     {uploading ? "Uploading..." : "Change Photo"}
                   </span>
                 </label>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Max 2MB</p>
               </div>
 
               {/* Profile Form */}

@@ -1,10 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../supabaseClient';
 import { useAuth } from '../AuthContext';
 import { useTheme } from "../ThemeContext";
 import DashboardHeader from "../components/DashboardHeader";
-import PostSkeleton from "../components/PostSkeleton"; 
+import PostSkeleton from "../components/PostSkeleton";
 
 const CreatePost = () => {
   const [title, setTitle] = useState('');
@@ -17,109 +17,194 @@ const CreatePost = () => {
 
   const { theme } = useTheme();
   const [clientId, setClientId] = useState(null);
-  const [allPosts, setAllPosts] = useState([]); 
+  const [allPosts, setAllPosts] = useState([]);
   const [comments, setComments] = useState({});
-  const [loadingPosts, setLoadingPosts] = useState(true); 
+  const [loadingPosts, setLoadingPosts] = useState(true);
+  const [expandedComments, setExpandedComments] = useState({});
 
-  useEffect(() => {
-    const loadClient = async () => {
-        if (!user) return;
-        
-        const { data, error } = await supabase
-        .from("clients")
-        .select("id")
-        .eq("user_id", user.id)
-        .single();
+  // Load client ID
+  const loadClient = useCallback(async () => {
+    if (!user) return;
+    
+    const { data, error } = await supabase
+      .from("clients")
+      .select("id")
+      .eq("user_id", user.id)
+      .single();
 
-        if (!error && data) {
-        setClientId(data.id);
-        }
-    };
-
-    loadClient();
+    if (!error && data) {
+      setClientId(data.id);
+    }
   }, [user]);
 
-  // Fetch profile for a post
-  const fetchPostWithProfile = async (postData) => {
+  useEffect(() => {
+    loadClient();
+  }, [loadClient]);
+
+  // Batch fetch ALL profiles (posts + comments)
+  const batchFetchAllProfiles = async (postsData, allCommentsData = []) => {
     try {
-      // First, get the client info for this post
-      const { data: client, error: clientError } = await supabase
-        .from("clients")
-        .select("id, user_id, email")
-        .eq("id", postData.client_id)
-        .maybeSingle();
-
-      if (clientError) {
-        console.warn("Client fetch error for post:", clientError);
-        return { ...postData, client: null, profile: null };
-      }
-
-      // Get the profile using the user_id from client
-      if (client?.user_id) {
-        const { data: profile, error: profileError } = await supabase
-          .from("profiles")
-          .select("avatar_url, full_name")
-          .eq("id", client.user_id)
-          .maybeSingle();
-
-        if (profileError) {
-          console.warn("Profile fetch error for post:", profileError);
-        }
-
+      // Collect ALL unique client IDs from posts AND comments
+      const postClientIds = postsData.map(post => post.client_id).filter(Boolean);
+      const commentClientIds = allCommentsData.map(comment => comment.client_id).filter(Boolean);
+      const allClientIds = [...new Set([...postClientIds, ...commentClientIds])];
+      
+      if (allClientIds.length === 0) {
         return {
-          ...postData,
-          client: client || null,
-          profile: profile || null
+          enrichedPosts: postsData.map(post => ({ ...post, client: null, profile: null })),
+          profilesMap: {}
         };
       }
 
-      return { ...postData, client: client || null, profile: null };
+      // Fetch ALL clients in one query
+      const { data: clients, error: clientsError } = await supabase
+        .from("clients")
+        .select("id, user_id, email")
+        .in("id", allClientIds);
+
+      if (clientsError) {
+        console.warn("Batch clients fetch error:", clientsError);
+        return {
+          enrichedPosts: postsData.map(post => ({ ...post, client: null, profile: null })),
+          profilesMap: {}
+        };
+      }
+
+      // Get ALL unique user IDs from clients
+      const userIds = [...new Set(clients.map(client => client.user_id).filter(Boolean))];
+      
+      let profilesMap = {};
+      if (userIds.length > 0) {
+        // Fetch ALL profiles in one query
+        const { data: profiles, error: profilesError } = await supabase
+          .from("profiles")
+          .select("id, avatar_url, full_name")
+          .in("id", userIds);
+
+        if (!profilesError && profiles) {
+          profiles.forEach(profile => {
+            profilesMap[profile.id] = profile;
+          });
+        }
+      }
+
+      // Map data back to posts
+      const enrichedPosts = postsData.map(post => {
+        const client = clients.find(c => c.id === post.client_id);
+        const profile = client ? profilesMap[client.user_id] : null;
+        
+        return {
+          ...post,
+          client: client || null,
+          profile: profile || null
+        };
+      });
+
+      return { enrichedPosts, profilesMap, clients };
     } catch (err) {
-      console.error("Error fetching post profile:", err);
-      return { ...postData, client: null, profile: null };
+      console.error("Batch fetch error:", err);
+      return {
+        enrichedPosts: postsData.map(post => ({ ...post, client: null, profile: null })),
+        profilesMap: {},
+        clients: []
+      };
     }
   };
 
-  // Load ALL posts from Supabase on component mount WITH PROFILES
-  useEffect(() => {
-    const loadPosts = async () => {
-      try {
-        setLoadingPosts(true); 
-        
-        const { data: postsData, error } = await supabase
-          .from('posts')
-          .select('*')
-          .order('created_at', { ascending: false });
-        
-        if (error) throw error;
-        
-        if (postsData) {
-          // Enrich each post with client and profile info
-          const enrichedPosts = await Promise.all(
-            postsData.map(async (post) => {
-              return await fetchPostWithProfile(post);
-            })
-          );
-          setAllPosts(enrichedPosts);
+  // Fetch ALL comments for ALL posts efficiently
+  const fetchAllComments = useCallback(async () => {
+    try {
+      // Fetch ALL comments in one query
+      const { data: allComments, error } = await supabase
+        .from("comments")
+        .select("*, clients(id, email, user_id)")
+        .order("created_at", { ascending: true });
+
+      if (error) throw error;
+
+      // Group comments by post_id
+      const commentsByPost = {};
+      allComments?.forEach(comment => {
+        if (!commentsByPost[comment.post_id]) {
+          commentsByPost[comment.post_id] = [];
         }
-      } catch (error) {
-        console.error('Error fetching posts:', error);
-      } finally {
-        setLoadingPosts(false); 
-      }
-    };
+        commentsByPost[comment.post_id].push(comment);
+      });
 
-    // Only load if we have a user
-    if (user) {
-        loadPosts();
+      return commentsByPost;
+    } catch (err) {
+      console.error("Error fetching all comments:", err);
+      return {};
     }
-  }, []); 
+  }, []);
 
-  // Enhanced Real-time subscription for ALL posts WITH PROFILE ENRICHMENT
-  useEffect(() => { 
-    if (!user) return; 
+  // Load ALL posts and comments efficiently
+  const loadPostsAndComments = useCallback(async () => {
+    try {
+      setLoadingPosts(true);
+      
+      // Fetch all posts
+      const { data: postsData, error: postsError } = await supabase
+        .from('posts')
+        .select('*')
+        .order('created_at', { ascending: false });
+      
+      if (postsError) throw postsError;
+      
+      if (!postsData || postsData.length === 0) {
+        setAllPosts([]);
+        setComments({});
+        setLoadingPosts(false);
+        return;
+      }
+
+      // Fetch all comments in parallel
+      const commentsByPost = await fetchAllComments();
+
+      // Get all unique comments for batch processing
+      const allComments = Object.values(commentsByPost).flat();
+      
+      // Batch fetch ALL profiles (posts + comments)
+      const { enrichedPosts, profilesMap, clients } = await batchFetchAllProfiles(postsData, allComments);
+      
+      setAllPosts(enrichedPosts);
+
+      // Enrich all comments with profiles
+      const enrichedCommentsByPost = {};
+      Object.entries(commentsByPost).forEach(([postId, postComments]) => {
+        enrichedCommentsByPost[postId] = postComments.map(comment => {
+          const client = clients.find(c => c.id === comment.client_id);
+          const profile = client ? profilesMap[client.user_id] : null;
+          
+          return {
+            ...comment,
+            clients: client || { id: comment.client_id, email: "" },
+            profile: profile || null,
+          };
+        });
+      });
+
+      setComments(enrichedCommentsByPost);
+
+    } catch (error) {
+      console.error('Error fetching posts and comments:', error);
+    } finally {
+      setLoadingPosts(false);
+    }
+  }, [fetchAllComments]);
+
+  useEffect(() => {
+    if (user) {
+      loadPostsAndComments();
+    }
+  }, [user, loadPostsAndComments]);
+
+  // Consolidated real-time subscription
+  useEffect(() => {
+    if (!user) return;
     
-    const subscription = supabase
+    // Posts subscription
+    const postsChannel = supabase
       .channel('posts-changes')
       .on(
         'postgres_changes',
@@ -130,20 +215,27 @@ const CreatePost = () => {
         },
         async (payload) => {
           if (payload.eventType === 'INSERT') {
-            // Enrich the new post with profile data
-            const enrichedPost = await fetchPostWithProfile(payload.new);
-            setAllPosts(prev => [enrichedPost, ...prev]);
+            // Enrich new post and update
+            const { enrichedPosts } = await batchFetchAllProfiles([payload.new]);
+            if (enrichedPosts[0]) {
+              setAllPosts(prev => [enrichedPosts[0], ...prev]);
+              // Initialize empty comments array for new post
+              setComments(prev => ({
+                ...prev,
+                [payload.new.id]: []
+              }));
+            }
           }
           else if (payload.eventType === 'UPDATE') {
-            // Enrich the updated post with profile data
-            const enrichedPost = await fetchPostWithProfile(payload.new);
-            setAllPosts(prev =>
-              prev.map(p => p.id === payload.new.id ? enrichedPost : p)
-            );
+            const { enrichedPosts } = await batchFetchAllProfiles([payload.new]);
+            if (enrichedPosts[0]) {
+              setAllPosts(prev =>
+                prev.map(p => p.id === payload.new.id ? enrichedPosts[0] : p)
+              );
+            }
           }
           else if (payload.eventType === 'DELETE') {
             setAllPosts(prev => prev.filter(p => p.id !== payload.old.id));
-            // Also remove comments for deleted post
             setComments(prev => {
               const newComments = { ...prev };
               delete newComments[payload.old.id];
@@ -154,8 +246,66 @@ const CreatePost = () => {
       )
       .subscribe();
 
+    // Comments subscription - handles ALL comment changes
+    const commentsChannel = supabase
+      .channel("comments-changes")
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "comments",
+        },
+        async (payload) => {
+          if (payload.eventType === "INSERT") {
+            // Enrich the new comment
+            const { enrichedPosts, profilesMap, clients } = await batchFetchAllProfiles([], [payload.new]);
+            const client = clients.find(c => c.id === payload.new.client_id);
+            const profile = client ? profilesMap[client.user_id] : null;
+            
+            const enrichedComment = {
+              ...payload.new,
+              clients: client || { id: payload.new.client_id, email: "" },
+              profile: profile || null,
+            };
+
+            setComments(prev => {
+              const postId = payload.new.post_id;
+              const existing = prev[postId] || [];
+              // Prevent duplicates
+              if (existing.some(c => c.id === payload.new.id)) return prev;
+              return {
+                ...prev,
+                [postId]: [...existing, enrichedComment]
+              };
+            });
+          }
+          else if (payload.eventType === "DELETE") {
+            setComments(prev => ({
+              ...prev,
+              [payload.old.post_id]: (prev[payload.old.post_id] || []).filter(
+                c => c.id !== payload.old.id
+              ),
+            }));
+          }
+          else if (payload.eventType === "UPDATE") {
+            setComments(prev => {
+              const postId = payload.new.post_id;
+              const arr = prev[postId] || [];
+              const idx = arr.findIndex(c => c.id === payload.new.id);
+              if (idx === -1) return prev;
+              const updated = [...arr];
+              updated[idx] = { ...updated[idx], ...payload.new };
+              return { ...prev, [postId]: updated };
+            });
+          }
+        }
+      )
+      .subscribe();
+
     return () => {
-      subscription.unsubscribe();
+      supabase.removeChannel(postsChannel);
+      supabase.removeChannel(commentsChannel);
     };
   }, [user]);
 
@@ -171,11 +321,10 @@ const CreatePost = () => {
       return;
     }
 
-    // Add this safety check:
     if (!clientId) {
-        setError('Unable to verify your account. Please try again.');
-        setLoading(false);
-        return;
+      setError('Unable to verify your account. Please try again.');
+      setLoading(false);
+      return;
     }
 
     try {
@@ -192,10 +341,7 @@ const CreatePost = () => {
 
       if (error) throw error;
       
-      // Show success message
       setSuccess('Your post has been created successfully!');
-      
-      // Clear form
       setTitle('');
       setDescription('');
       
@@ -207,27 +353,22 @@ const CreatePost = () => {
     }
   };
 
-  // Auto-close success messages
+  // Auto-close success & error messages
   useEffect(() => {
     if (success) {
-      const timer = setTimeout(() => {
-        setSuccess('');
-      }, 5000);
+      const timer = setTimeout(() => setSuccess(''), 5000);
       return () => clearTimeout(timer);
     }
   }, [success]);
 
-  // Auto-close error messages  
   useEffect(() => {
     if (error) {
-      const timer = setTimeout(() => {
-        setError('');
-      }, 7000);
+      const timer = setTimeout(() => setError(''), 7000);
       return () => clearTimeout(timer);
     }
   }, [error]);
 
-  // Update a post (only for user's own posts)
+  // Update a post
   const handleUpdatePost = async (postId, newTitle, newDescription) => {
     try {
       const { data, error } = await supabase
@@ -240,7 +381,6 @@ const CreatePost = () => {
         .select();
 
       if (error) throw error;
-
       setSuccess('Post updated successfully!');
     } catch (error) {
       console.error('Error updating post:', error);
@@ -248,7 +388,7 @@ const CreatePost = () => {
     }
   };
 
-  // Delete a post (only for user's own posts)
+  // Delete a post
   const handleDeletePost = async (postId) => {
     if (!window.confirm('Are you sure you want to delete this post?')) {
       return;
@@ -261,7 +401,6 @@ const CreatePost = () => {
         .eq('id', postId);
 
       if (error) throw error;
-
       setSuccess('Post deleted successfully!');
     } catch (error) {
       console.error('Error deleting post:', error);
@@ -269,71 +408,11 @@ const CreatePost = () => {
     }
   };
 
-  // Fetch comments for a post (KEEPING YOUR ORIGINAL FUNCTION)
-  const fetchComments = async (postId) => {
-    try {
-      const { data, error } = await supabase
-        .from("comments")
-        .select("*, clients(id, email, user_id)")
-        .eq("post_id", postId)
-        .order("created_at", { ascending: true });
-
-      if (error) throw error;
-
-      // Append profiles
-      const commentsWithProfiles = await Promise.all(
-        (data || []).map(async (comment) => {
-          try {
-            // Extract user_id correctly (clients is returned as an array)
-            const clientUserId = Array.isArray(comment.clients)
-              ? comment.clients[0]?.user_id
-              : comment.clients?.user_id;
-
-            if (!clientUserId) {
-              console.warn(
-                "❗ No user_id found inside clients relationship for comment:",
-                comment.id
-              );
-              return { ...comment, profile: null };
-            }
-
-            // Fetch the profile using maybeSingle() to avoid PGRST116
-            const { data: profile, error: profileError } = await supabase
-              .from("profiles")
-              .select("avatar_url, full_name")
-              .eq("id", clientUserId)
-              .maybeSingle();
-
-            if (profileError) {
-              console.warn(`❗ Profile fetch error for ${clientUserId}`, profileError);
-            }
-
-            return {
-              ...comment,
-              // normalize clients to object (if array, take first item)
-              clients: Array.isArray(comment.clients) ? comment.clients[0] : comment.clients || {},
-              profile: profile || null,
-            };
-          } catch (err) {
-            console.warn("❗ Unexpected profile fetch error:", err);
-            return { ...comment, profile: null };
-          }
-        })
-      );
-
-      return commentsWithProfiles;
-    } catch (err) {
-      console.error("Error fetching comments:", err);
-      return [];
-    }
-  };
-
-  // Add a new comment 
-  const handleAddComment = async (postId, content) => {
-    if (!content.trim()) return;
+  // Add comment
+  const handleAddComment = useCallback(async (postId, content) => {
+    if (!content.trim() || !clientId) return;
 
     try {
-      // insert
       const { data, error } = await supabase
         .from("comments")
         .insert([
@@ -346,164 +425,25 @@ const CreatePost = () => {
         .select();
 
       if (error) throw error;
-
-      const newComment = data?.[0];
-      if (!newComment) return null;
-
-      // fetch client + profile for the new comment (same enrichment as realtime)
-      const { data: client, error: clientError } = await supabase
-        .from("clients")
-        .select("id, email, user_id")
-        .eq("id", newComment.client_id)
-        .maybeSingle();
-
-      if (clientError) console.warn("Client fetch error (add comment):", clientError);
-
-      const { data: profile, error: profileError } = await supabase
-        .from("profiles")
-        .select("avatar_url, full_name")
-        .eq("id", client?.user_id)
-        .maybeSingle();
-
-      if (profileError) console.warn("Profile fetch error (add comment):", profileError);
-
-      const enriched = {
-        ...newComment,
-        clients: client || { id: newComment.client_id, email: "" },
-        profile: profile || null,
-      };
-
-      setComments((prev) => {
-        const existingForPost = prev[postId] || [];
-        if (existingForPost.some((c) => c.id === enriched.id)) {
-          return prev;
-        }
-        return { ...prev, [postId]: [...existingForPost, enriched] };
-      });
-
-      return enriched;
+      return data?.[0];
     } catch (err) {
       console.error("Error adding comment:", err);
       throw err;
     }
-  };
+  }, [clientId]);
 
-  // Load comments for all posts on mount
-  useEffect(() => {
-    const loadAllComments = async () => {
-      const commentsMap = {};
-      for (const post of allPosts) {
-        const postComments = await fetchComments(post.id);
-        commentsMap[post.id] = postComments;
-      }
-      setComments(commentsMap);
-    };
-    
-    if (allPosts.length > 0) {
-      loadAllComments();
-    }
-  }, [allPosts]);
-
-  // Real-time subscription for comments 
-  useEffect(() => {
-    const subscription = supabase
-      .channel("comments-changes")
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "comments",
-        },
-        async (payload) => {
-          // INSERT (only)
-          if (payload.eventType === "INSERT") {
-            try {
-              // fetch the client record for this comment
-              const { data: client, error: clientError } = await supabase
-                .from("clients")
-                .select("id, email, user_id")
-                .eq("id", payload.new.client_id)
-                .maybeSingle();
-
-              if (clientError) {
-                console.warn("Client fetch error:", clientError);
-              }
-
-              // fetch profile by auth user id 
-              const userId = client?.user_id;
-              const { data: profile, error: profileError } = await supabase
-                .from("profiles")
-                .select("avatar_url, full_name")
-                .eq("id", userId)
-                .maybeSingle();
-
-              if (profileError) {
-                console.warn("Profile fetch error:", profileError);
-              }
-
-              // Build the normalized comment object
-              const commentWithData = {
-                ...payload.new,
-                clients: client || { id: payload.new.client_id, email: "" },
-                profile: profile || null,
-              };
-
-              setComments((prev) => {
-                const postId = payload.new.post_id;
-                const existingForPost = prev[postId] || [];
-
-                // Prevent duplicates
-                if (existingForPost.some((c) => c.id === commentWithData.id)) {
-                  return prev;
-                }
-
-                return {
-                  ...prev,
-                  [postId]: [...existingForPost, commentWithData],
-                };
-              });
-            } catch (err) {
-              console.error("Realtime handler error:", err);
-            }
-          }
-
-          // DELETE
-          else if (payload.eventType === "DELETE") {
-            setComments((prev) => ({
-              ...prev,
-              [payload.old.post_id]: (prev[payload.old.post_id] || []).filter(
-                (c) => c.id !== payload.old.id
-              ),
-            }));
-          }
-
-          // UPDATE
-          else if (payload.eventType === "UPDATE") {
-            setComments((prev) => {
-              const postId = payload.new.post_id;
-              const arr = prev[postId] || [];
-              const idx = arr.findIndex((c) => c.id === payload.new.id);
-              if (idx === -1) return prev;
-              const updated = [...arr];
-              updated[idx] = { ...updated[idx], ...payload.new };
-              return { ...prev, [postId]: updated };
-            });
-          }
-        }
-      )
-      .subscribe();
-
-    return () => {
-      subscription.unsubscribe();
-    };
+  // Toggle comments visibility
+  const toggleComments = useCallback((postId) => {
+    setExpandedComments(prev => ({
+      ...prev,
+      [postId]: !prev[postId]
+    }));
   }, []);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 dark:from-gray-900 dark:via-gray-800 dark:to-gray-900 transition-colors duration-200">
       <DashboardHeader title="Create Post" />
 
-      {/* Main Content */}
       <main className="max-w-4xl mx-auto px-4 py-8">
         {/* Create Post Form */}
         <form onSubmit={handleSubmit} className="bg-white dark:bg-gray-800 rounded-xl shadow-md p-6 border border-gray-100 dark:border-gray-700 transition-colors duration-200 mb-8">
@@ -641,24 +581,26 @@ const CreatePost = () => {
           
           <div className="space-y-4">
             {loadingPosts ? (
-              // Show 2 skeleton posts while loading
               Array.from({ length: 2 }).map((_, index) => (
                 <PostSkeleton key={`skeleton-${index}`} />
               ))
             ) : (
-              // Show actual posts when loaded
               allPosts.map((post) => {
                 const isUserPost = post.client_id === clientId;
+                const postComments = comments[post.id] || [];
+                
                 return (
                   <PostItem 
                     key={post.id} 
                     post={post} 
                     onUpdate={isUserPost ? handleUpdatePost : null}
                     onDelete={isUserPost ? handleDeletePost : null}
-                    comments={comments[post.id] || []}
+                    comments={postComments}
                     onAddComment={handleAddComment}
                     currentUser={user}
                     isUserPost={isUserPost}
+                    isCommentsExpanded={!!expandedComments[post.id]}
+                    onToggleComments={() => toggleComments(post.id)}
                   />
                 );
               })
@@ -676,15 +618,25 @@ const CreatePost = () => {
   );
 };
 
-// Updated PostItem component WITH POST AUTHOR INFO
-const PostItem = ({ post, onUpdate, onDelete, comments = [], onAddComment, currentUser, isUserPost }) => {
+// PostItem component 
+const PostItem = ({ 
+  post, 
+  onUpdate, 
+  onDelete, 
+  comments = [], 
+  onAddComment, 
+  currentUser, 
+  isUserPost,
+  isCommentsExpanded,
+  onToggleComments 
+}) => {
   const [isEditing, setIsEditing] = useState(false);
   const [editTitle, setEditTitle] = useState(post.title);
   const [editDescription, setEditDescription] = useState(post.description);
   const [loading, setLoading] = useState(false);
   const [commentText, setCommentText] = useState('');
   const [addingComment, setAddingComment] = useState(false);
-  const [showComments, setShowComments] = useState(false);
+  const [imageLoaded, setImageLoaded] = useState(false);
 
   const handleSave = async () => {
     setLoading(true);
@@ -712,6 +664,14 @@ const PostItem = ({ post, onUpdate, onDelete, comments = [], onAddComment, curre
       setAddingComment(false);
     }
   };
+
+  const formattedDate = post.created_at ? new Date(post.created_at).toLocaleDateString('en-US', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  }) : 'Recently';
 
   return (
     <div className="border border-gray-200 dark:border-gray-600 rounded-lg p-4">
@@ -747,15 +707,23 @@ const PostItem = ({ post, onUpdate, onDelete, comments = [], onAddComment, curre
         </div>
       ) : (
         <div>
-          {/* POST AUTHOR INFO - NEW SECTION */}
+          {/* POST AUTHOR INFO */}
           <div className="flex items-center gap-3 mb-3">
             <div className="w-8 h-8 rounded-full bg-gradient-to-r from-indigo-500 to-purple-500 flex items-center justify-center text-white text-sm font-semibold overflow-hidden">
               {post.profile?.avatar_url ? (
-                <img 
-                  src={post.profile.avatar_url} 
-                  alt="Author Avatar" 
-                  className="w-full h-full object-cover"
-                />
+                <>
+                  {!imageLoaded && (
+                    <div className="absolute w-8 h-8 bg-gray-300 dark:bg-gray-600 animate-pulse rounded-full" />
+                  )}
+                  <img 
+                    src={post.profile.avatar_url} 
+                    alt="Author Avatar" 
+                    className={`w-full h-full object-cover ${imageLoaded ? 'opacity-100' : 'opacity-0'}`}
+                    loading="lazy"
+                    onLoad={() => setImageLoaded(true)}
+                    onError={() => setImageLoaded(true)}
+                  />
+                </>
               ) : (
                 post.profile?.full_name?.charAt(0).toUpperCase() || 
                 post.client?.email?.charAt(0).toUpperCase() || 
@@ -773,14 +741,9 @@ const PostItem = ({ post, onUpdate, onDelete, comments = [], onAddComment, curre
                   </span>
                 )}
               </div>
+              
               <p className="text-xs text-gray-500 dark:text-gray-400">
-                {post.created_at ? new Date(post.created_at).toLocaleDateString('en-US', {
-                  year: 'numeric',
-                  month: 'short',
-                  day: 'numeric',
-                  hour: '2-digit',
-                  minute: '2-digit'
-                }) : 'Recently'}
+                {formattedDate}
               </p>
             </div>
           </div>
@@ -796,8 +759,8 @@ const PostItem = ({ post, onUpdate, onDelete, comments = [], onAddComment, curre
           <div className="mt-4 border-t border-gray-200 dark:border-gray-600 pt-3">
             {/* Comment Toggle */}
             <button
-              onClick={() => setShowComments(!showComments)}
-              className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 mb-3"
+              onClick={onToggleComments}
+              className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 mb-3 cursor-pointer"
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
@@ -805,7 +768,7 @@ const PostItem = ({ post, onUpdate, onDelete, comments = [], onAddComment, curre
               {comments.length} {comments.length === 1 ? 'Comment' : 'Comments'}
             </button>
 
-            {/* Add Comment Input - AVAILABLE FOR ALL POSTS */}
+            {/* Add Comment Input */}
             <div className="flex gap-2 mb-3">
               <input
                 type="text"
@@ -824,18 +787,21 @@ const PostItem = ({ post, onUpdate, onDelete, comments = [], onAddComment, curre
               </button>
             </div>
 
-            {/* Comments List */}
-            {showComments && comments.length > 0 && (
+            {/* Comments List - Only shown when expanded */}
+            {isCommentsExpanded && comments.length > 0 && (
               <div className="space-y-3 mt-3">
                 {comments.map((comment) => {
+                  // Format comment date
+                  const commentDate = comment.created_at ? new Date(comment.created_at).toLocaleDateString() : '';
                   return (
                     <div key={comment.id} className="flex gap-3">
-                      <div className="w-6 h-6 rounded-full bg-gradient-to-r from-indigo-500 to-purple-500 flex items-center justify-center text-white text-xs font-semibold overflow-hidden"> 
+                      <div className="w-6 h-6 rounded-full bg-gradient-to-r from-indigo-500 to-purple-500 flex items-center justify-center text-white text-xs font-semibold overflow-hidden flex-shrink-0">
                         {comment.profile?.avatar_url ? (
                           <img 
                             src={comment.profile.avatar_url} 
                             alt="Avatar" 
                             className="w-full h-full object-cover"
+                            loading="lazy"
                           />
                         ) : (
                           comment.profile?.full_name?.charAt(0).toUpperCase() || 
@@ -848,17 +814,17 @@ const PostItem = ({ post, onUpdate, onDelete, comments = [], onAddComment, curre
                         </div>
                         <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                           {comment.profile?.full_name ||
-                            (Array.isArray(comment.clients) ? comment.clients[0]?.email : comment.clients?.email)} • {new Date(comment.created_at).toLocaleDateString()}
+                            (Array.isArray(comment.clients) ? comment.clients[0]?.email : comment.clients?.email)} • {commentDate}
                         </p>
                       </div>
                     </div>
-                  )
+                  );
                 })}
               </div>
             )}
           </div>
 
-          {/* Post Actions (only for user's own posts) */}
+          {/* Post Actions */}
           {isUserPost && onUpdate && onDelete && (
             <div className="flex gap-2 mt-3">
               <button
