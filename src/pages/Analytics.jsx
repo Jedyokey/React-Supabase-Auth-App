@@ -11,7 +11,7 @@ import {
 } from "chart.js";
 
 import DashboardHeader from "../components/DashboardHeader";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useTheme } from "../ThemeContext";
 import { supabase } from "../supabaseClient";
 
@@ -26,11 +26,31 @@ ChartJS.register(
   Legend
 );
 
+// Helper function to get last 6 months with year handling
+const getLastSixMonths = () => {
+  const months = [];
+  const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  
+  const currentDate = new Date();
+  const currentYear = currentDate.getFullYear();
+  
+  // Get last 6 months including current month
+  for (let i = 5; i >= 0; i--) {
+    const date = new Date(currentYear, currentDate.getMonth() - i, 1);
+    const monthName = monthNames[date.getMonth()];
+    const year = date.getFullYear();
+    const yearSuffix = year !== currentYear ? ` '${year.toString().slice(-2)}` : '';
+    months.push(`${monthName}${yearSuffix}`);
+  }
+  
+  return months;
+};
+
 export default function Analytics() {
   const [orders, setOrders] = useState([]);
   const { theme } = useTheme();
 
-  // Fetch real orders 
+  // Fetch real orders and update on changes
   useEffect(() => {
     const fetchOrders = async () => {
       const { data } = await supabase
@@ -42,23 +62,42 @@ export default function Analytics() {
     };
 
     fetchOrders();
+
+    // Subscribe to real-time changes
+    const channel = supabase
+      .channel('analytics-orders-changes')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'orders'
+        },
+        () => {
+          fetchOrders(); // Refresh when orders change
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, []);
 
-  // ======================================
-  //     DEMO DATA FOR NOW (STATIC)
-  // ======================================
-  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun"];
+  // Get dynamic last 6 months
+  const months = useMemo(() => getLastSixMonths(), []);
 
   const currentMonth = new Date().toLocaleString('default', { month: 'short' });
   const currentYear = new Date().getFullYear();
 
+  // Simple random demo data - different each time
   const ordersChartData = {
     labels: months,
     datasets: [
       {
         label: "Orders",
-        data: [12, 19, 8, 15, 22, 30],
-        backgroundColor: "rgba(147, 51, 234, 0.6)", // Purple
+        data: months.map(() => Math.floor(Math.random() * 30) + 5), // Random 5-35
+        backgroundColor: "rgba(147, 51, 234, 0.6)", 
         borderColor: "rgba(147, 51, 234, 1)",
         borderWidth: 2,
         tension: 0.4, // Smooth line
@@ -75,8 +114,8 @@ export default function Analytics() {
     datasets: [
       {
         label: "Revenue ($)",
-        data: [500, 900, 650, 1200, 1800, 2100],
-        backgroundColor: "rgba(236, 72, 153, 0.7)", // Pink
+        data: months.map(() => Math.floor(Math.random() * 2000) + 300), // Random 300-2300
+        backgroundColor: "rgba(236, 72, 153, 0.7)", 
         borderColor: "rgba(236, 72, 153, 1)",
         borderWidth: 0,
         borderRadius: 6, // Rounded bars
@@ -85,7 +124,7 @@ export default function Analytics() {
   };
 
   // Chart options with dark mode support
-  const chartOptions = {
+  const chartOptions = useMemo(() => ({
     responsive: true,
     maintainAspectRatio: false,
     plugins: {
@@ -147,7 +186,18 @@ export default function Analytics() {
         right: 10
       }
     }
-  };
+  }), [theme]);
+
+  // Real-time stats based on actual orders
+  const totalRevenue = useMemo(() => 
+    orders.reduce((sum, order) => sum + (order.price || 0), 0), 
+    [orders]
+  );
+  
+  const averageOrder = useMemo(() => 
+    orders.length > 0 ? (totalRevenue / orders.length).toFixed(2) : 0, 
+    [orders, totalRevenue]
+  );
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 dark:from-gray-900 dark:via-gray-800 dark:to-gray-900 transition-colors duration-200">
@@ -161,6 +211,9 @@ export default function Analytics() {
           </h1>
           <p className="text-sm sm:text-base text-gray-600 dark:text-gray-400">
             Here's an insight into your store's activity and revenue trends.
+          </p>
+          <p className="text-xs text-gray-500 dark:text-gray-500 mt-1">
+            Showing data for last 6 months: {months.join(" → ")}
           </p>
         </div>
 
@@ -201,13 +254,13 @@ export default function Analytics() {
           </div>
           <div className="bg-white dark:bg-gray-800 p-4 rounded-lg border border-gray-200 dark:border-gray-700 text-center transition-colors duration-200">
             <div className="text-2xl font-bold text-green-600 dark:text-green-400">
-              ${orders.reduce((sum, order) => sum + (order.price || 0), 0)}
+              ${totalRevenue.toFixed(2)}
             </div>
             <div className="text-sm text-gray-600 dark:text-gray-400 mt-1">Total Revenue</div>
           </div>
           <div className="bg-white dark:bg-gray-800 p-4 rounded-lg border border-gray-200 dark:border-gray-700 text-center transition-colors duration-200">
             <div className="text-2xl font-bold text-blue-600 dark:text-blue-400">
-              {orders.length > 0 ? (orders.reduce((sum, order) => sum + (order.price || 0), 0) / orders.length).toFixed(2) : 0}
+              ${averageOrder}
             </div>
             <div className="text-sm text-gray-600 dark:text-gray-400 mt-1">Avg. Order</div>
           </div>
